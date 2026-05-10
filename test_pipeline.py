@@ -47,32 +47,32 @@ try:
     from features import extract_features
     features = extract_features(test_mask, test_depth)
     assert features is not None, "features is None"
-    assert len(features) == 11, f"len(features) is {len(features)}, expected 11"
+    assert len(features) == 12, f"len(features) is {len(features)}, expected 12"
     expected = ['height','width','box_area','pothole_area','nonpothole_area',
                 'mean_depth','max_depth','min_depth','depth_std',
-                'depth_range','p90_depth']
+                'depth_range','p90_depth','local_depth_contrast']
     assert all(k in features for k in expected), "missing expected keys"
-    print("TEST 3 - Original extract_features returns exactly 11 features: PASSED")
+    print("TEST 3 - Original extract_features returns exactly 12 features: PASSED")
     passed_count += 1
 except Exception as e:
-    failed_tests.append(("TEST 3", str(e), "Check features.py extract_features and ensure it returns 11 keys"))
-    print(f"TEST 3 - Original extract_features returns exactly 11 features: FAILED ({e})")
+    failed_tests.append(("TEST 3", str(e), "Check features.py extract_features and ensure it returns 12 keys"))
+    print(f"TEST 3 - Original extract_features returns exactly 12 features: FAILED ({e})")
 
 # TEST 4
 try:
     from features import extract_features_extended
     features_ext = extract_features_extended(test_mask, test_depth)
     assert features_ext is not None, "features_ext is None"
-    assert len(features_ext) == 20, f"len(features_ext) is {len(features_ext)}, expected 20"
+    assert len(features_ext) == 21, f"len(features_ext) is {len(features_ext)}, expected 21"
     new_keys = ['aspect_ratio','solidity','compactness','depth_skewness',
                 'depth_kurtosis','boundary_gradient','weighted_mean_depth',
                 'surface_area_px2','surface_area_cm2']
     assert all(k in features_ext for k in new_keys), "missing extended keys"
-    print("TEST 4 - extract_features_extended returns exactly 20 features: PASSED")
+    print("TEST 4 - extract_features_extended returns exactly 21 features: PASSED")
     passed_count += 1
 except Exception as e:
-    failed_tests.append(("TEST 4", str(e), "Check features.py extract_features_extended returning exactly 20 features"))
-    print(f"TEST 4 - extract_features_extended returns exactly 20 features: FAILED ({e})")
+    failed_tests.append(("TEST 4", str(e), "Check features.py extract_features_extended returning exactly 21 features"))
+    print(f"TEST 4 - extract_features_extended returns exactly 21 features: FAILED ({e})")
 
 # TEST 5
 try:
