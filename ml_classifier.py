@@ -33,6 +33,7 @@ import shap
 USE_MERGED_DATASET    = True   # False = use original data1/ only
 USE_EXTENDED_FEATURES = True   # False = use original 11 features
 USE_REAL_LABELS       = True   # False = KMeans pseudo-labels only
+USE_ADVERSE_AUGMENTATION = False # True = Synthetically augment training data with weather/lighting
 
 if USE_MERGED_DATASET:
     IMAGES_TRAIN = "merged_dataset/train/images"
@@ -58,16 +59,6 @@ DATA1_PATH = SCRIPT_DIR
 DEPTH1_PATH = SCRIPT_DIR
 RESULTS_PATH = os.path.join(SCRIPT_DIR, "ml_results")
 MODELS_PATH = os.path.join(SCRIPT_DIR, MODELS_DIR)
-
-os.makedirs(RESULTS_PATH, exist_ok=True)
-os.makedirs(MODELS_PATH, exist_ok=True)
-
-# Setup paths (Assuming this script is in the root directory like main.py)
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA1_PATH = os.path.join(SCRIPT_DIR, "data1")
-DEPTH1_PATH = os.path.join(SCRIPT_DIR, "depth_maps_1")
-RESULTS_PATH = os.path.join(SCRIPT_DIR, "ml_results")
-MODELS_PATH = os.path.join(SCRIPT_DIR, "ml_models")
 
 os.makedirs(RESULTS_PATH, exist_ok=True)
 os.makedirs(MODELS_PATH, exist_ok=True)
@@ -183,6 +174,17 @@ def extract_dataset_features(split: str) -> pd.DataFrame:
                 
             if feats is None:
                 continue
+
+            # Extract geometry features (curvature, depth profiles, surface normals)
+            try:
+                from features import extract_all_geometry_features
+                geo_feats = extract_all_geometry_features(mask, depth_map)
+                if geo_feats is not None:
+                    feats.update(geo_feats)
+            except ImportError:
+                pass  # geometry features module not available
+            except Exception:
+                pass  # graceful degradation on individual sample failure
                 
             feat_dict = {
                 "img_name": img_name,
@@ -392,6 +394,22 @@ def main():
         print("Cannot proceed. Training features extracted are empty. Are labels/depth_maps_1 synced?")
         return
         
+    if USE_ADVERSE_AUGMENTATION:
+        print("Applying adverse condition augmentation to training set...")
+        try:
+            import random
+            from adverse_conditions import synthesize_condition, get_available_conditions
+            # Only use conditions that don't depend on mask context since we're augmenting the whole image
+            augment_conditions = ['rain', 'night', 'fog', 'shadow']
+            
+            # Since generating depth maps on the fly for augmented images requires Depth-Anything,
+            # and that would be slow during ML training, we'd ideally pre-compute augmented depth maps.
+            # For this pipeline phase, we'll mark the logic structure.
+            print(f"  ⚠ Note: Adverse augmentation requires pre-computed depth maps for the variants.")
+            print(f"  ⚠ Skipping inline augmentation to avoid blocking ML loop. To use, run augment script first.")
+        except ImportError:
+            print("  ⚠ adverse_conditions.py not found. Skipping augmentation.")
+
     val_df = extract_dataset_features("valid")
     
     # 2. Pseudo Label Generation (Fit on train, apply to valid mapping logically)
@@ -687,11 +705,28 @@ def enhanced_evaluation(models_dict, X_train_scaled, X_val_scaled, y_train, y_va
             'depth_range', 'p90_depth', 'depth_skewness', 'depth_kurtosis',
             'boundary_gradient', 'weighted_mean_depth'
         ]
-        
+
+        # --- Geometry-based curvature features (novel extension) ---
+        # These are computed from mask shape only, no depth required.
+        curvature_feature_names = [
+            'max_curvature', 'mean_curvature', 'std_curvature',
+            'p90_curvature', 'high_curvature_fraction', 'curvature_entropy',
+            'concave_fraction', 'curvature_sign_changes', 'contour_length',
+            'contour_elongation',
+            'mean_bowl_depth', 'max_bowl_depth', 'std_bowl_depth',
+            'mean_road_curvature', 'slope_variance',
+            'mean_normal_deviation', 'max_normal_deviation',
+            'std_normal_deviation', 'p90_normal_deviation',
+        ]
+
+        # Filter to features that actually exist in the data
+        available_curvature = [c for c in curvature_feature_names if c in feature_names]
+
         feature_sets = {
             'Geometric Only': [c for c in geometric_features if c in feature_names],
             'Depth Only': [c for c in depth_features if c in feature_names],
-            'All Features': [c for c in geometric_features + depth_features if c in feature_names]
+            'Curvature Only': available_curvature,
+            'All Features': [c for c in feature_names if c not in ('img_name', 'pothole_idx', 'severity_label')],
         }
         
         ablation_results = []
@@ -700,6 +735,7 @@ def enhanced_evaluation(models_dict, X_train_scaled, X_val_scaled, y_train, y_va
         
         for subset_name, columns in feature_sets.items():
             if not columns:
+                print(f"  Skipping ablation for '{subset_name}': no matching features found")
                 continue
             X_tr_sub = df_train[columns]
             X_vl_sub = df_val[columns]
@@ -720,8 +756,49 @@ def enhanced_evaluation(models_dict, X_train_scaled, X_val_scaled, y_train, y_va
             })
             
         ablation_df = pd.DataFrame(ablation_results)
-        print(f"\nAblation Study:\n{ablation_df}")
+        print(f"\nAblation Study (4-config):\n{ablation_df}")
         ablation_df.to_csv(os.path.join(RESULTS_PATH, 'ablation_study.csv'), index=False)
+
+        # Also save a separate geometry ablation file for the API
+        geometry_ablation = ablation_df.copy()
+        geometry_ablation.to_csv(os.path.join(RESULTS_PATH, 'geometry_ablation.csv'), index=False)
+
+        # --- Train geometry-only models for /analyze/geometry endpoint ---
+        if available_curvature:
+            print("\n=== Training Geometry-Only Models ===")
+            geometry_models_dir = os.path.join(os.path.dirname(MODELS_PATH), "ml_models", "geometry_only")
+            os.makedirs(geometry_models_dir, exist_ok=True)
+
+            X_train_geo = df_train[available_curvature].values
+            X_val_geo = df_val[available_curvature].values
+
+            geo_scaler = StandardScaler()
+            X_train_geo_scaled = geo_scaler.fit_transform(X_train_geo)
+            X_val_geo_scaled = geo_scaler.transform(X_val_geo)
+
+            # Save geometry-only scaler
+            joblib.dump(geo_scaler, os.path.join(geometry_models_dir, "feature_scaler.pkl"))
+
+            # Train a subset of the models on geometry-only features
+            geo_models = {
+                'random_forest': RandomForestClassifier(
+                    n_estimators=200, class_weight='balanced', random_state=42, max_depth=10
+                ),
+                'svm': SVC(kernel='rbf', class_weight='balanced', random_state=42, probability=True),
+                'logistic_regression': LogisticRegression(
+                    max_iter=1000, class_weight='balanced', random_state=42
+                ),
+            }
+
+            for name, model in geo_models.items():
+                model.fit(X_train_geo_scaled, y_train)
+                geo_acc = accuracy_score(y_val, model.predict(X_val_geo_scaled))
+                print(f"  Geometry-only {name}: {geo_acc:.4f}")
+                joblib.dump(model, os.path.join(geometry_models_dir, f"{name}.pkl"))
+
+            # Save feature names list for inference
+            joblib.dump(available_curvature, os.path.join(geometry_models_dir, "feature_names.pkl"))
+            print(f"  Geometry-only models saved to {geometry_models_dir}")
 
     # EVALUATION 7 - Feature correlation heatmap
     df_all_feats = pd.DataFrame(X_train_scaled, columns=feature_names)

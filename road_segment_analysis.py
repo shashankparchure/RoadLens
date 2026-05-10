@@ -23,6 +23,12 @@ from features import extract_features_extended
 from classifier import classify_severity as rule_based_classify
 from inference import get_depth_map, _load_depth_model
 
+try:
+    from temporal_analysis import estimate_pothole_age, predict_severity_progression
+    HAS_TEMPORAL = True
+except ImportError:
+    HAS_TEMPORAL = False
+
 SEVERITY_MAP = {0: "Shallow", 1: "Moderate", 2: "Deep"}
 WEIGHTS = {"Deep": 3, "Moderate": 2, "Shallow": 1, "No pothole": 0, "Unknown": 0}
 
@@ -174,6 +180,25 @@ def analyze_segment(images_folder, output_dir):
             if WEIGHTS.get(consensus, 0) > WEIGHTS.get(worst_severity_found, 0):
                 worst_severity_found = consensus
                 
+            # Temporal Analysis Integration
+            age_category = "Unknown"
+            age_score = 0.5
+            age_factor = 1.0
+            
+            if HAS_TEMPORAL:
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                age_estimate = estimate_pothole_age(mask, image_rgb)
+                if age_estimate:
+                    age_category = age_estimate.get("age_category", "Unknown")
+                    age_score = age_estimate.get("age_score", 0.5)
+                    
+                    # Age affects priority: Chronic (>0.75) gets 1.5x boost, Fresh (<0.25) gets 0.8x
+                    age_factor = 0.5 + age_score * 1.33
+                    age_factor = max(0.5, min(2.0, age_factor))
+                    
+                    # Predict progression (optional, just to save in results)
+                    progression = predict_severity_progression(consensus, age_estimate)
+                    
             if consensus in severity_distribution:
                 severity_distribution[consensus] += 1
                 
@@ -182,7 +207,10 @@ def analyze_segment(images_folder, output_dir):
             total_max_depth += max_depth
             total_volume_approx_cm3 += volume_cm3
             
-            score_numerator += WEIGHTS.get(consensus, 0) * pothole_area_px
+            # Base score from severity and area
+            base_score = WEIGHTS.get(consensus, 0) * pothole_area_px
+            # Final score factored by age (older = higher priority)
+            score_numerator += base_score * age_factor
             
             row = {
                 'image_name': img_name,
@@ -194,7 +222,9 @@ def analyze_segment(images_folder, output_dir):
                 'surface_area_cm2': features.get('surface_area_cm2', 0),
                 'max_depth': max_depth,
                 'mean_depth': features.get('mean_depth', 0),
-                'volume_approx_cm3': volume_cm3
+                'volume_approx_cm3': volume_cm3,
+                'age_category': age_category,
+                'age_factor': round(age_factor, 2)
             }
             
             # specifically requested fields
