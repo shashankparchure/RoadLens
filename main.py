@@ -42,6 +42,7 @@ def _load_depth_model():
     if depth_anything_root not in sys.path:
         sys.path.append(depth_anything_root)
 
+    # pyrefly: ignore [missing-import]
     from depth_anything_v2.dpt import DepthAnythingV2
 
     model_path = os.path.join(
@@ -131,7 +132,7 @@ def run_pipeline(
         local_contrast = 0.0 if features is None else float(features.get("local_depth_contrast", 0.0))
         depth_std = 0.0 if features is None else float(features.get("depth_std", 0.0))
         label_lines = [
-            f"Class: {consensus}",
+            f"Class: {severity}",
             f"Drop: {local_contrast:.3f}",
             f"Roughness: {depth_std:.3f}",
         ]

@@ -23,8 +23,26 @@ import numpy as np
 
 # ── project imports ──────────────────────────────────────────────────────────
 from classifier import classify_severity          # rule-based
-from features import extract_depth_features, extract_features_extended
+from features import extract_depth_features, extract_features_extended, extract_all_geometry_features, extract_curvature_features
 from segmentation import get_all_masks            # YOLO segmentation
+
+# Optional imports for new modules (graceful degradation)
+try:
+    from water_detection import detect_water as _detect_water
+    _HAS_WATER_DETECTION = True
+except ImportError:
+    _HAS_WATER_DETECTION = False
+
+# Optional SfS integration (Frankot-Chellappa local depth refinement)
+try:
+    from shape_from_shading import reconstruct_depth_sfs as _reconstruct_sfs
+    _HAS_SFS = True
+except ImportError:
+    _HAS_SFS = False
+
+# When True, replace depth inside pothole mask with SfS reconstruction
+# Provides finer local bowl shape than monocular Depth-Anything-V2
+USE_SFS_DEPTH = False
 
 # ── paths ────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -93,6 +111,7 @@ def _load_depth_model():
     if depth_root not in sys.path:
         sys.path.append(depth_root)
 
+    # pyrefly: ignore [missing-import]
     from depth_anything_v2.dpt import DepthAnythingV2
 
     ckpt = os.path.join(depth_root, "checkpoints", "depth_anything_v2_vits.pth")
@@ -294,6 +313,28 @@ def run_inference(
             interpolation=cv2.INTER_LINEAR,
         )
 
+    # ── 2b. Optional SfS depth refinement ────────────────────────────────────
+    if USE_SFS_DEPTH and _HAS_SFS:
+        print("  Applying SfS depth refinement...")
+        # SfS replaces depth inside each mask with Frankot-Chellappa reconstruction
+        # This captures fine-grained bowl curvature that DA-V2 smooths over
+        for mask_item in masks:
+            if np.sum(mask_item) >= 50:
+                try:
+                    gray = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
+                    sfs_height = _reconstruct_sfs(gray, mask_item)
+                    if sfs_height is not None:
+                        # Scale SfS to match depth map range inside mask
+                        d_inside = depth_map[mask_item > 0]
+                        if len(d_inside) > 0:
+                            d_min, d_max = float(d_inside.min()), float(d_inside.max())
+                            sfs_inside = sfs_height[mask_item > 0]
+                            if np.std(sfs_inside) > 1e-8:
+                                sfs_scaled = d_min + (sfs_height * (d_max - d_min))
+                                depth_map[mask_item > 0] = sfs_scaled[mask_item > 0]
+                except Exception as sfs_err:
+                    print(f"  ⚠  SfS failed for mask: {sfs_err}")
+
     # ── 3. Feature extraction ────────────────────────────────────────────────
     print("[3/4] Extracting features...")
 
@@ -309,6 +350,7 @@ def run_inference(
         expected_features = int(getattr(scaler, "n_features_in_", 11))
 
     potholes: List[Dict[str, object]] = []
+    image_rgb = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)  # precompute once
     for idx, mask in enumerate(masks, start=1):
         depth_features = extract_depth_features(mask, depth_map)
         if depth_features is None:
@@ -328,19 +370,50 @@ def run_inference(
         consensus, consensus_count, total_classifiers = _majority_vote(verdicts)
         bbox = _bbox_from_mask(mask)
 
-        potholes.append(
-            {
-                "id": idx,
-                "mask": mask,
-                "bbox": bbox,
-                "rule_severity": rule_severity,
-                "ml_predictions": ml_predictions,
-                "consensus_severity": consensus,
-                "consensus_count": consensus_count,
-                "total_classifiers": total_classifiers,
-                "features": _serializable_features(depth_features),
+        # ── Geometry features (novel extension) ──
+        geometry_features = None
+        try:
+            geometry_features = extract_all_geometry_features(mask, depth_map, image_rgb)
+        except Exception as geo_err:
+            print(f"  ⚠  Geometry feature extraction failed for pothole #{idx}: {geo_err}")
+
+        # ── Water detection (novel extension) ──
+        water_result = None
+        if _HAS_WATER_DETECTION:
+            try:
+                curvature_feats = extract_curvature_features(mask)
+                water_result = _detect_water(
+                    image_rgb, mask,
+                    depth_map=depth_map,
+                    curvature_features=curvature_feats,
+                )
+            except Exception as water_err:
+                print(f"  ⚠  Water detection failed for pothole #{idx}: {water_err}")
+
+        pothole_entry = {
+            "id": idx,
+            "mask": mask,
+            "bbox": bbox,
+            "rule_severity": rule_severity,
+            "ml_predictions": ml_predictions,
+            "consensus_severity": consensus,
+            "consensus_count": consensus_count,
+            "total_classifiers": total_classifiers,
+            "features": _serializable_features(depth_features),
+        }
+
+        # Add geometry features if available
+        if geometry_features is not None:
+            pothole_entry["geometry_features"] = {
+                k: round(float(v), 6) if isinstance(v, (int, float)) else v
+                for k, v in geometry_features.items()
             }
-        )
+
+        # Add water detection if available
+        if water_result is not None:
+            pothole_entry["water_detection"] = water_result
+
+        potholes.append(pothole_entry)
 
     # ── 4. Classification ────────────────────────────────────────────────────
     print("[4/4] Classifying severity...\n")
@@ -365,6 +438,25 @@ def run_inference(
                 f"max_depth={feats['max_depth']:.4f}, "
                 f"drop={feats['local_depth_contrast']:.4f}"
             )
+
+            # Print geometry features if available
+            if "geometry_features" in p:
+                gf = p["geometry_features"]
+                print(
+                    f"    Geometry    → max_curv={gf.get('max_curvature', 0):.6f}, "
+                    f"bowl={gf.get('mean_bowl_depth', 0):.4f}, "
+                    f"normal_dev={gf.get('mean_normal_deviation', 0):.2f}°"
+                )
+
+            # Print water detection if available
+            if "water_detection" in p:
+                wd = p["water_detection"]
+                status = "WATER" if wd.get('is_water') else "DRY"
+                prob = wd.get('water_probability', 0)
+                conf = wd.get('confidence_level', 'none')
+                print(
+                    f"    Water       → {status} (prob={prob:.1%}, conf={conf})"
+                )
         print()
     else:
         print("  No potholes detected.\n")
@@ -491,6 +583,8 @@ def run_inference(
                     "consensus_count": int(p["consensus_count"]),
                     "total_classifiers": int(p["total_classifiers"]),
                     "features": p["features"],
+                    **({"geometry_features": p["geometry_features"]} if "geometry_features" in p else {}),
+                    **({"water_detection": p["water_detection"]} if "water_detection" in p else {}),
                 }
                 for p in potholes
             ],

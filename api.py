@@ -22,6 +22,25 @@ from inference import (
 from features import extract_depth_features
 from classifier import classify_severity
 
+# Optional imports for new modules (graceful degradation)
+try:
+    from features import extract_all_geometry_features, extract_curvature_features
+    _HAS_GEOMETRY = True
+except ImportError:
+    _HAS_GEOMETRY = False
+
+try:
+    from water_detection import detect_water as _detect_water
+    _HAS_WATER_DETECTION = True
+except ImportError:
+    _HAS_WATER_DETECTION = False
+
+try:
+    from temporal_analysis import estimate_pothole_age, predict_severity_progression
+    _HAS_TEMPORAL = True
+except ImportError:
+    _HAS_TEMPORAL = False
+
 app = FastAPI(title="Pothole Detection API")
 PROJECT_ROOT = Path(__file__).resolve().parent
 ML_RESULTS_DIR = PROJECT_ROOT / "ml_results"
@@ -88,6 +107,315 @@ def encode_image(image: np.ndarray) -> str:
         return ""
     base64_str = base64.b64encode(buffer).decode("utf-8")
     return f"data:image/jpeg;base64,{base64_str}"
+
+
+def compute_depth_slice(
+    mask: np.ndarray, depth_map: np.ndarray, water_detected: bool = False, severity: str = "Moderate", image_gray: Optional[np.ndarray] = None
+) -> Optional[Dict[str, object]]:
+    """Compute a horizontal depth cross-section through a pothole centroid.
+
+    Returns the raw sample arrays for charting: actual depth values along the
+    slice plus a quadratic road-surface extrapolation from outside the mask.
+    """
+    if mask is None or depth_map is None or np.sum(mask) == 0:
+        return None
+
+    h, w = mask.shape[:2]
+
+    # Normalize depth to [0, 1]
+    d = depth_map.astype(np.float32)
+    d_min, d_max = float(d.min()), float(d.max())
+    if d_max > d_min:
+        d = (d - d_min) / (d_max - d_min)
+    else:
+        return None
+
+    # Find centroid
+    ys, xs = np.where(mask > 0)
+    if len(ys) == 0:
+        return None
+    cy, cx = int(ys.mean()), int(xs.mean())
+
+    # Bounding box for the mask region
+    x_min, x_max = int(xs.min()), int(xs.max())
+    p_width = max(1, x_max - x_min)
+    margin = int(p_width * 0.8)  # extend beyond the pothole
+
+    # Sample range along the horizontal slice (y = cy)
+    sample_start = max(0, x_min - margin)
+    sample_end = min(w - 1, x_max + margin)
+
+    slice_points = []
+    outside_xs = []
+    outside_depths = []
+
+    for px in range(sample_start, sample_end + 1):
+        depth_val = float(d[cy, px])
+        in_mask = bool(mask[cy, px] > 0)
+        slice_points.append({
+            "x": px - sample_start,  # relative position
+            "actualDepth": round(depth_val, 4),
+            "inMask": in_mask,
+        })
+        if not in_mask:
+            outside_xs.append(float(px - sample_start))
+            outside_depths.append(depth_val)
+
+    if len(outside_xs) < 4 or len(slice_points) < 5:
+        return None
+
+    # Fit quadratic to road surface outside the mask
+    try:
+        road_coeffs = np.polyfit(outside_xs, outside_depths, 2)
+        for pt in slice_points:
+            x_val = float(pt["x"])
+            pt["roadSurface"] = round(
+                float(road_coeffs[0] * x_val**2 + road_coeffs[1] * x_val + road_coeffs[2]), 4
+            )
+    except (np.linalg.LinAlgError, ValueError):
+        # Fallback: use mean of outside depths as flat road surface
+        road_mean = float(np.mean(outside_depths))
+        for pt in slice_points:
+            pt["roadSurface"] = round(road_mean, 4)
+
+    # If water is detected, extrapolate the hidden depth using boundary curvature (the visible walls)
+    predicted_bowl_depth = None
+    if water_detected:
+        # Find the mask boundaries in our slice
+        mask_indices = [i for i, pt in enumerate(slice_points) if pt["inMask"]]
+        if len(mask_indices) > 10:
+            m_start = mask_indices[0]
+            m_end = mask_indices[-1]
+            m_width = m_end - m_start
+            
+            # Use the outer 20% of the pothole as the "visible walls" before it hits the flat water
+            wall_margin = max(3, int(m_width * 0.20))
+            
+            wall_xs = []
+            wall_depths = []
+            
+            # Include points just outside the mask (road edge) and just inside (pothole lip)
+            for i in range(max(0, m_start - 5), min(len(slice_points), m_start + wall_margin)):
+                wall_xs.append(slice_points[i]["x"])
+                wall_depths.append(slice_points[i]["actualDepth"])
+                
+            for i in range(max(0, m_end - wall_margin), min(len(slice_points), m_end + 5)):
+                wall_xs.append(slice_points[i]["x"])
+                wall_depths.append(slice_points[i]["actualDepth"])
+                
+            try:
+                # Fit a parabola specifically to the walls to predict the bottom
+                wall_coeffs = np.polyfit(wall_xs, wall_depths, 2)
+                
+                a = wall_coeffs[0]
+                b = wall_coeffs[1]
+                c = wall_coeffs[2]
+                
+                # Check if parabola is concave-up (bowl shape). In MiDaS, lower depth = further away = deeper.
+                # So a bowl should curve downwards (a > 0).
+                # If 'a' is near 0 or negative, the depth model completely failed to see the walls due to water.
+                if a < 1e-5:
+                    # GEOMETRIC FALLBACK: Infer 3D depth from 2D width + ML Consensus
+                    w_px = slice_points[m_end]["x"] - slice_points[m_start]["x"]
+                    if w_px > 0:
+                        mid_x = (slice_points[m_start]["x"] + slice_points[m_end]["x"]) / 2.0
+                        
+                        # Scale the extrapolated depth based on the non-depth ML classifiers
+                        if severity == "Shallow":
+                            multiplier = 0.0002
+                        elif severity == "Deep":
+                            multiplier = 0.0012
+                        else:
+                            multiplier = 0.0006
+                            
+                        d_max = w_px * multiplier
+                        a_fallback = (4 * d_max) / (w_px ** 2)
+                        
+                        for pt in slice_points:
+                            x_val = float(pt["x"])
+                            # Parabola centered at mid_x, dropping by d_max
+                            predicted = a_fallback * (x_val - mid_x)**2 + (pt["roadSurface"] - d_max)
+                            
+                            predicted = min(predicted, pt["roadSurface"])
+                            if pt["inMask"]:
+                                predicted = min(predicted, pt["actualDepth"])
+                            pt["predictedDepth"] = round(predicted, 4)
+                else:
+                    # Use the 3D derived wall curvature
+                    for pt in slice_points:
+                        x_val = float(pt["x"])
+                        predicted = float(a * x_val**2 + b * x_val + c)
+                        
+                        predicted = min(predicted, pt["roadSurface"])
+                        if pt["inMask"]:
+                            predicted = min(predicted, pt["actualDepth"])
+                        pt["predictedDepth"] = round(predicted, 4)
+                        
+                # Calculate predicted bowl depth
+                pred_gaps = [abs(pt["roadSurface"] - pt.get("predictedDepth", pt["actualDepth"])) for pt in slice_points if pt["inMask"]]
+                if pred_gaps:
+                    predicted_bowl_depth = round(max(pred_gaps), 4)
+            except (np.linalg.LinAlgError, ValueError):
+                pass
+                
+    # If prediction failed or no water, predicted depth is just actual depth
+    for pt in slice_points:
+        if "predictedDepth" not in pt:
+            pt["predictedDepth"] = pt["actualDepth"]
+
+    # Compute actual bowl depth (gap between road surface and actual/water surface)
+    bowl_depth = 0.0
+    for pt in slice_points:
+        if pt["inMask"]:
+            gap = abs(pt["roadSurface"] - pt["actualDepth"])
+            bowl_depth = max(bowl_depth, gap)
+
+    # SfS FALLBACK (For Dry, Flat MiDaS Failures)
+    if not water_detected and bowl_depth < 0.02 and image_gray is not None:
+        try:
+            from shape_from_shading import reconstruct_depth_sfs
+            sfs_height = reconstruct_depth_sfs(image_gray, mask)
+            if sfs_height is not None:
+                # sfs_height is [0,1] normalized height. h=0 is bottom, h=1 is road.
+                scale = 0.05 if severity == "Moderate" else (0.1 if severity == "Deep" else 0.02)
+                for pt in slice_points:
+                    if pt["inMask"]:
+                        x_val = float(pt["x"])
+                        px = int(x_val + sample_start)
+                        # The drop from road surface
+                        sfs_depth_drop = (1.0 - float(sfs_height[cy, px])) * scale
+                        predicted = pt["roadSurface"] - sfs_depth_drop
+                        
+                        # SfS provides high-frequency micro-geometry. 
+                        # We merge it with actualDepth to preserve whatever macro shape exists.
+                        predicted = min(predicted, pt["actualDepth"]) 
+                        pt["predictedDepth"] = round(predicted, 4)
+                        
+                # Recalculate predicted bowl depth
+                pred_gaps = [abs(pt["roadSurface"] - pt.get("predictedDepth", pt["actualDepth"])) for pt in slice_points if pt["inMask"]]
+                if pred_gaps:
+                    predicted_bowl_depth = round(max(pred_gaps), 4)
+        except Exception:
+            pass
+
+    return {
+        "slicePoints": slice_points,
+        "sliceY": cy,
+        "sliceStartX": sample_start,
+        "sliceEndX": sample_end,
+        "bowlDepth": round(bowl_depth, 4),
+        "predictedBowlDepth": predicted_bowl_depth,
+    }
+
+
+def build_depth_annotated_image(
+    original_image: np.ndarray,
+    depth_map: np.ndarray,
+    mask_records: List[Tuple[np.ndarray, Dict[str, object]]],
+) -> np.ndarray:
+    """Build an annotated depth overlay with contours, markers, and slice lines."""
+    h, w = original_image.shape[:2]
+    canvas = original_image.copy()
+
+    # Normalize depth to 0-255 for contouring
+    d = depth_map.astype(np.float32)
+    d_min, d_max = float(d.min()), float(d.max())
+    if d_max > d_min:
+        d_norm = ((d - d_min) / (d_max - d_min) * 255).astype(np.uint8)
+    else:
+        d_norm = np.zeros((h, w), dtype=np.uint8)
+
+    # Depth colormap for the overlay inside pothole masks
+    depth_colored = cv2.applyColorMap(d_norm, cv2.COLORMAP_INFERNO)
+
+    for mask, pothole in mask_records:
+        severity = str(pothole.get("consensusSeverity", "No Pothole"))
+        sev_color = SEVERITY_COLORS_BGR.get(severity, (255, 255, 255))
+
+        # Blend depth colormap inside the mask region
+        mask_bool = mask > 0
+        blended = cv2.addWeighted(original_image, 0.35, depth_colored, 0.65, 0)
+        canvas[mask_bool] = blended[mask_bool]
+
+        # Draw iso-depth contour lines inside each pothole
+        masked_depth = d_norm.copy()
+        masked_depth[~mask_bool] = 0
+        n_levels = 6
+        depth_vals = d_norm[mask_bool]
+        if len(depth_vals) > 0:
+            lo, hi = int(depth_vals.min()), int(depth_vals.max())
+            if hi > lo:
+                step = max(1, (hi - lo) // n_levels)
+                for level in range(lo + step, hi, step):
+                    binary = (masked_depth >= level).astype(np.uint8) * 255
+                    contours, _ = cv2.findContours(
+                        binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
+                    )
+                    cv2.drawContours(
+                        canvas, contours, -1, (255, 255, 255), 1, cv2.LINE_AA
+                    )
+
+        # Min/Max depth markers
+        ys, xs = np.where(mask_bool)
+        if len(ys) > 0:
+            depth_vals_f = d[mask_bool]
+            min_idx = int(np.argmin(depth_vals_f))
+            max_idx = int(np.argmax(depth_vals_f))
+
+            # Min depth marker (cyan diamond)
+            mn_x, mn_y = int(xs[min_idx]), int(ys[min_idx])
+            cv2.drawMarker(
+                canvas, (mn_x, mn_y), (255, 255, 0),
+                cv2.MARKER_DIAMOND, 14, 2, cv2.LINE_AA,
+            )
+            cv2.putText(
+                canvas, "MIN", (mn_x + 8, mn_y - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 0), 1, cv2.LINE_AA,
+            )
+
+            # Max depth marker (red diamond)
+            mx_x, mx_y = int(xs[max_idx]), int(ys[max_idx])
+            cv2.drawMarker(
+                canvas, (mx_x, mx_y), (0, 0, 255),
+                cv2.MARKER_DIAMOND, 14, 2, cv2.LINE_AA,
+            )
+            cv2.putText(
+                canvas, "MAX", (mx_x + 8, mx_y - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1, cv2.LINE_AA,
+            )
+
+        # Draw the horizontal slice line through centroid
+        depth_profile = pothole.get("depthProfile")
+        if depth_profile:
+            sy = depth_profile["sliceY"]
+            sx1 = depth_profile["sliceStartX"]
+            sx2 = depth_profile["sliceEndX"]
+            cv2.line(canvas, (sx1, sy), (sx2, sy), (0, 255, 255), 1, cv2.LINE_AA)
+            # Small endpoint markers
+            cv2.drawMarker(
+                canvas, (sx1, sy), (0, 255, 255),
+                cv2.MARKER_TILTED_CROSS, 6, 1, cv2.LINE_AA,
+            )
+            cv2.drawMarker(
+                canvas, (sx2, sy), (0, 255, 255),
+                cv2.MARKER_TILTED_CROSS, 6, 1, cv2.LINE_AA,
+            )
+            cv2.putText(
+                canvas, "SLICE", (sx1 + 4, sy - 6),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 255), 1, cv2.LINE_AA,
+            )
+
+        # Pothole ID label
+        bbox_obj = pothole.get("bbox")
+        if bbox_obj:
+            cv2.putText(
+                canvas,
+                f"P{pothole['id']} — {severity}",
+                (int(bbox_obj["x1"]), max(15, int(bbox_obj["y1"]) - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, sev_color, 2, cv2.LINE_AA,
+            )
+
+    return canvas
 
 
 def draw_labeled_bbox(
@@ -445,6 +773,111 @@ async def analyze_image(file: UploadFile = File(...)):
                 "consensusCount": int(consensus_count),
                 "totalClassifiers": int(total_classifiers),
             }
+
+            # Geometry & DINOv2 features (novel extension — additive only)
+            if _HAS_GEOMETRY:
+                try:
+                    image_rgb = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+                    geo_feats = extract_all_geometry_features(mask, depth_map, image_rgb)
+                    if geo_feats is not None:
+                        pothole["geometryAnalysis"] = {
+                            "curvatureFeatures": {
+                                k: round(float(v), 6) if isinstance(v, (int, float)) else v
+                                for k, v in geo_feats.items() if not k.startswith("dinov2")
+                            },
+                        }
+                        
+                        # Extract DINOv2 foundation features specifically into a sub-object
+                        dinov2_features = {k: v for k, v in geo_feats.items() if k.startswith("dinov2")}
+                        if dinov2_features:
+                            pothole["geometryAnalysis"]["foundationFeatures"] = {
+                                "dissimilarity": round(dinov2_features.get("dinov2_dissimilarity", 0), 4),
+                                "insideVariance": round(dinov2_features.get("dinov2_inside_variance", 0), 4),
+                                "outsideVariance": round(dinov2_features.get("dinov2_outside_variance", 0), 4),
+                            }
+                            
+                            # ── Texture Illusion Override ──
+                            # If model predicts "Deep" but the texture inside is smoother than the road outside,
+                            # it is likely a texture-based depth illusion (shallow depression).
+                            if consensus == "Deep" or rule_severity == "Deep":
+                                inside_var = dinov2_features.get("dinov2_inside_variance", 0)
+                                outside_var = dinov2_features.get("dinov2_outside_variance", 0)
+                                if 0 < inside_var < (outside_var * 0.9):  
+                                    pothole["consensusSeverity"] = "Shallow"
+                                    pothole["illusionWarning"] = True
+                except Exception:
+                    pass  # graceful degradation
+
+            # Water detection (novel extension — additive only)
+            if _HAS_WATER_DETECTION:
+                try:
+                    image_rgb = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+                    curv_feats = extract_curvature_features(mask) if _HAS_GEOMETRY else None
+                    water_result = _detect_water(
+                        image_rgb, mask,
+                        depth_map=depth_map,
+                        curvature_features=curv_feats,
+                    )
+                    if water_result is not None:
+                        pothole["waterAnalysis"] = {
+                            "waterDetected": water_result.get('is_water', False),
+                            "waterProbability": water_result.get('water_probability', 0.0),
+                            "confidenceLevel": water_result.get('confidence_level', 'low'),
+                            "inconsistencyScore": water_result.get('inconsistency_score'),
+                        }
+                except Exception:
+                    pass  # graceful degradation
+                    
+            # Temporal Analysis (novel extension — additive only)
+            if _HAS_TEMPORAL:
+                try:
+                    image_rgb = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+                    age_estimate = estimate_pothole_age(mask, image_rgb)
+                    if age_estimate:
+                        progression = predict_severity_progression(
+                            current_severity=rule_severity,
+                            age_estimate=age_estimate,
+                            weather_context="freeze_thaw"
+                        )
+                        pothole["temporalAnalysis"] = {
+                            "ageCategory": age_estimate["age_category"],
+                            "ageScore": round(age_estimate["age_score"], 2),
+                            "ageDescription": age_estimate["age_description"],
+                            "edgeSharpness": round(age_estimate["edge_sharpness"], 2),
+                            "crackTexture": round(age_estimate["crack_texture_score"], 2),
+                            "progression": {
+                                "30d": progression["prediction_30d"]["severity"],
+                                "60d": progression["prediction_60d"]["severity"],
+                                "90d": progression["prediction_90d"]["severity"],
+                            }
+                        }
+                except Exception:
+                    pass
+
+            # Depth cross-section profile for interpretable charting
+            try:
+                water_detected = pothole.get("waterAnalysis", {}).get("waterDetected", False)
+                severity = pothole.get("consensusSeverity", "Moderate")
+                image_gray = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
+                
+                # If an illusion was detected, physically flatten the depth map inside the mask 
+                # before generating the cross-section chart to reflect true shallow geometry.
+                chart_depth_map = depth_map
+                if pothole.get("illusionWarning"):
+                    chart_depth_map = depth_map.copy()
+                    road_mean = np.mean(chart_depth_map[mask == 0]) if np.any(mask == 0) else np.mean(chart_depth_map)
+                    chart_depth_map = np.where(mask > 0, 
+                                               chart_depth_map * 0.15 + (road_mean * 0.85), 
+                                               chart_depth_map)
+
+                depth_profile = compute_depth_slice(
+                    mask, chart_depth_map, water_detected=water_detected, severity=severity, image_gray=image_gray
+                )
+                if depth_profile:
+                    pothole["depthProfile"] = depth_profile
+            except Exception:
+                pass  # graceful degradation
+
             potholes.append(pothole)
             mask_records.append((mask, pothole))
 
@@ -495,6 +928,12 @@ async def analyze_image(file: UploadFile = File(...)):
         depth_heatmap = cv2.applyColorMap(depth_norm, cv2.COLORMAP_INFERNO)
         img_depth = encode_image(depth_heatmap)
 
+        # Annotated depth overlay (contours, markers, slice lines)
+        depth_annotated_img = build_depth_annotated_image(
+            original_image, depth_map, mask_records,
+        )
+        img_depth_annotated = encode_image(depth_annotated_img)
+
         schematic_img = build_schematic_image(original_image.shape, potholes)
         img_schematic = encode_image(schematic_img)
 
@@ -516,6 +955,12 @@ async def analyze_image(file: UploadFile = File(...)):
             total_classifiers = int(representative["totalClassifiers"])
             bbox = representative["bbox"]
 
+        # Detect if any pothole has water
+        has_water_filled = any(
+            p.get("waterAnalysis", {}).get("waterDetected", False)
+            for p in potholes
+        )
+
         return JSONResponse(
             {
                 "success": True,
@@ -531,9 +976,11 @@ async def analyze_image(file: UploadFile = File(...)):
                     "original": img_original,
                     "maskOverlay": img_mask,
                     "depthHeatmap": img_depth,
+                    "depthAnnotated": img_depth_annotated,
                     "schematic": img_schematic,
                 },
                 "bbox": bbox,
+                "hasWaterFilledPotholes": has_water_filled,
             }
         )
 
