@@ -1,23 +1,19 @@
 import { useState, useMemo } from 'react';
 import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid,
+  Area, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, Line, ComposedChart,
 } from 'recharts';
-import { TrendingDown, ChevronDown } from 'lucide-react';
+import { ChevronDown, Info } from 'lucide-react';
+import InstrumentPanel from '../instrument/InstrumentPanel';
+import { severityToken } from '../../theme/severity';
 
-const SEVERITY_COLORS = {
-  'No Pothole': '#22c55e',
-  'Shallow':    '#eab308',
-  'Moderate':   '#f97316',
-  'Deep':       '#ef4444',
-};
+const WATER = { line: '#5eead4', fill: '#2dd4bf', soft: '#2dd4bf' };
+const MONO_TICK = { fontSize: 10, fill: '#97a0b1', fontFamily: 'IBM Plex Mono, monospace' };
 
 /**
- * Renders the depth cross-section profile for a selected pothole.
- *
- * Shows the actual depth (filled area) vs the extrapolated road surface
- * (dashed line). The gap between them is the "bowl depth" — the signal
- * that drives severity classification.
+ * Depth cross-section through the pothole centroid: measured depth vs the
+ * extrapolated road surface; the gap is bowl depth. Water mode swaps to the
+ * iridescent palette and shows the predicted submerged floor.
  */
 export default function DepthProfileChart({ potholes }) {
   const candidates = useMemo(
@@ -34,7 +30,7 @@ export default function DepthProfileChart({ potholes }) {
   const pothole = candidates[selectedIdx] || candidates[0];
   const profile = pothole.depthProfile;
   const severity = pothole.consensusSeverity || 'No Pothole';
-  const fillColor = SEVERITY_COLORS[severity] || '#8b5cf6';
+  const fillColor = severityToken(severity).color;
 
   // Downsample slice data for smooth charting (cap at ~200 points)
   const raw = profile.slicePoints;
@@ -48,45 +44,38 @@ export default function DepthProfileChart({ potholes }) {
   const hasWater = pothole.waterAnalysis?.waterDetected;
   const isDistorted = hasWater;
 
+  const badge = isDistorted
+    ? profile.predictedBowlDepth
+      ? { text: `PREDICTED DEPTH ${(profile.predictedBowlDepth * 100).toFixed(1)}%`, color: '#f87171' }
+      : { text: 'DEPTH UNKNOWN · SUBMERGED', color: WATER.line }
+    : { text: `BOWL DEPTH ${(profile.bowlDepth * 100).toFixed(1)}%`, color: fillColor };
+
   return (
-    <div className="glass-card-bright p-4 fade-in-up border border-white/10 relative overflow-hidden">
-      {/* Header row */}
-      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-        <div className="flex items-center gap-2">
-          <TrendingDown className="w-4 h-4 text-amber-400" />
-          <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest">
-            Depth Cross-Section
-          </h3>
-        </div>
-
+    <InstrumentPanel
+      title="Cross-Section Profile"
+      accent={isDistorted ? 'holo' : 'amber'}
+      statusLabel={isDistorted ? 'WATER MODE' : severityToken(severity).label}
+      flicker={false}
+      headerRight={
         <div className="flex items-center gap-3">
-          {/* Bowl depth badge */}
           <span
-            className="px-2.5 py-1 rounded-full text-[11px] font-bold tracking-wide"
-            style={{
-              background: isDistorted ? (profile.predictedBowlDepth ? '#ef444420' : '#3b82f620') : `${fillColor}20`,
-              color: isDistorted ? (profile.predictedBowlDepth ? '#f87171' : '#60a5fa') : fillColor,
-              border: `1px solid ${isDistorted ? (profile.predictedBowlDepth ? '#ef444440' : '#3b82f640') : fillColor + '40'}`,
-            }}
+            className="px-2.5 py-1 rounded-[2px] font-mono text-[10px] tracking-[0.1em] font-semibold border"
+            style={{ background: `${badge.color}18`, color: badge.color, borderColor: `${badge.color}45` }}
           >
-            {isDistorted 
-              ? (profile.predictedBowlDepth ? `Predicted Depth: ${(profile.predictedBowlDepth * 100).toFixed(1)}%` : 'Depth: Unknown (Submerged)') 
-              : `Bowl Depth: ${(profile.bowlDepth * 100).toFixed(1)}%`}
+            {badge.text}
           </span>
-
-          {/* Pothole selector (when multiple) */}
           {candidates.length > 1 && (
-            <div className="relative z-10">
+            <div className="relative">
               <select
                 value={selectedIdx}
                 onChange={e => setSelectedIdx(Number(e.target.value))}
-                className="appearance-none bg-slate-800/80 text-slate-300 text-xs
-                           pl-2.5 pr-7 py-1.5 rounded-md border border-white/10
-                           focus:outline-none focus:border-amber-500/40 cursor-pointer"
+                className="appearance-none bg-slate-800 text-slate-300 font-mono text-[10px] tracking-[0.08em]
+                           pl-2.5 pr-7 py-1.5 rounded-[2px] border border-slate-700
+                           focus:outline-none focus:border-amber-500/50 cursor-pointer"
               >
                 {candidates.map((p, i) => (
                   <option key={p.id} value={i}>
-                    Pothole {p.id} — {p.consensusSeverity}
+                    P-{String(p.id).padStart(2, '0')} · {p.consensusSeverity}
                   </option>
                 ))}
               </select>
@@ -94,63 +83,63 @@ export default function DepthProfileChart({ potholes }) {
             </div>
           )}
         </div>
-      </div>
-
-      {/* Warning Banner for Water */}
+      }
+      bodyClassName="p-4 relative"
+    >
+      {/* Water distortion notice */}
       {isDistorted && (
-        <div className="absolute top-12 left-1/2 -translate-x-1/2 bg-blue-900/80 border border-blue-500/50 text-blue-200 text-[10px] px-3 py-1 rounded-full z-10 backdrop-blur-sm flex items-center gap-1.5">
-          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-slate-950/85 border border-holo-teal/40 text-holo-teal-bright font-mono text-[9px] uppercase tracking-[0.12em] px-3 py-1 rounded-[2px] z-10 backdrop-blur-sm flex items-center gap-1.5">
+        <Info className="w-3 h-3" />
           Water refraction is flattening the depth profile
         </div>
       )}
 
       {/* Chart */}
-      <div className="h-[180px] w-full">
+      <div className="h-[190px] w-full">
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={chartData} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
             <defs>
               <linearGradient id="depthFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={isDistorted ? '#3b82f6' : fillColor} stopOpacity={isDistorted ? 0.3 : 0.5} />
-                <stop offset="100%" stopColor={isDistorted ? '#3b82f6' : fillColor} stopOpacity={0.05} />
+                <stop offset="0%" stopColor={isDistorted ? WATER.fill : fillColor} stopOpacity={isDistorted ? 0.3 : 0.5} />
+                <stop offset="100%" stopColor={isDistorted ? WATER.fill : fillColor} stopOpacity={0.05} />
               </linearGradient>
             </defs>
 
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+            <CartesianGrid strokeDasharray="3 3" stroke="#29303f" />
 
             <XAxis
               dataKey="x"
-              tick={{ fontSize: 10, fill: '#94a3b8' }}
-              axisLine={{ stroke: '#334155' }}
+              tick={MONO_TICK}
+              axisLine={{ stroke: '#29303f' }}
               tickLine={false}
               label={{
-                value: 'Position (px)',
+                value: 'POSITION (PX)',
                 position: 'insideBottomRight',
                 offset: -2,
-                style: { fontSize: 10, fill: '#64748b' },
+                style: { fontSize: 9, fill: '#626b7d', fontFamily: 'IBM Plex Mono, monospace', letterSpacing: '0.1em' },
               }}
             />
             <YAxis
               domain={['auto', 'auto']}
-              tick={{ fontSize: 10, fill: '#94a3b8' }}
-              axisLine={{ stroke: '#334155' }}
+              tick={MONO_TICK}
+              axisLine={{ stroke: '#29303f' }}
               tickLine={false}
               label={{
-                value: 'Depth',
+                value: 'DEPTH',
                 angle: -90,
                 position: 'insideLeft',
-                style: { fontSize: 10, fill: '#64748b' },
+                style: { fontSize: 9, fill: '#626b7d', fontFamily: 'IBM Plex Mono, monospace', letterSpacing: '0.1em' },
               }}
             />
 
             <Tooltip
               contentStyle={{
-                background: 'rgba(15,23,42,0.95)',
-                border: '1px solid rgba(255,255,255,0.1)',
-                borderRadius: 8,
+                background: 'rgba(10,12,16,0.95)',
+                border: '1px solid #3c4354',
+                borderRadius: 2,
                 fontSize: 11,
-                color: '#e2e8f0',
+                fontFamily: 'IBM Plex Mono, monospace',
+                color: '#cdd3dd',
               }}
               formatter={(value, name) => {
                 const labels = {
@@ -163,30 +152,30 @@ export default function DepthProfileChart({ potholes }) {
               labelFormatter={v => `Position: ${v}px`}
             />
 
-            {/* Pothole region highlight */}
+            {/* Pothole region boundaries */}
             {maskStart >= 0 && maskEnd >= 0 && (
               <ReferenceLine
                 x={chartData[maskStart]?.x}
-                stroke={isDistorted ? '#3b82f6' : fillColor}
+                stroke={isDistorted ? WATER.soft : fillColor}
                 strokeDasharray="4 2"
                 strokeOpacity={0.4}
                 label={{
                   value: '◀ pothole',
                   position: 'top',
-                  style: { fontSize: 9, fill: isDistorted ? '#60a5fa' : fillColor },
+                  style: { fontSize: 9, fill: isDistorted ? WATER.line : fillColor, fontFamily: 'IBM Plex Mono, monospace' },
                 }}
               />
             )}
             {maskStart >= 0 && maskEnd >= 0 && (
               <ReferenceLine
                 x={chartData[maskEnd]?.x}
-                stroke={isDistorted ? '#3b82f6' : fillColor}
+                stroke={isDistorted ? WATER.soft : fillColor}
                 strokeDasharray="4 2"
                 strokeOpacity={0.4}
                 label={{
                   value: 'pothole ▶',
                   position: 'top',
-                  style: { fontSize: 9, fill: isDistorted ? '#60a5fa' : fillColor },
+                  style: { fontSize: 9, fill: isDistorted ? WATER.line : fillColor, fontFamily: 'IBM Plex Mono, monospace' },
                 }}
               />
             )}
@@ -195,15 +184,15 @@ export default function DepthProfileChart({ potholes }) {
             <Line
               type="monotone"
               dataKey="roadSurface"
-              stroke="#38bdf8"
+              stroke="#67e8f9"
               strokeWidth={2}
               strokeDasharray="6 3"
               dot={false}
               name="roadSurface"
               isAnimationActive={false}
             />
-            
-            {/* Predicted Submerged Depth (Visible only if computed) */}
+
+            {/* Predicted submerged depth (water only) */}
             {isDistorted && profile.predictedBowlDepth && (
               <Line
                 type="monotone"
@@ -221,9 +210,9 @@ export default function DepthProfileChart({ potholes }) {
             <Area
               type="monotone"
               dataKey="actualDepth"
-              stroke={isDistorted ? '#60a5fa' : fillColor}
-              strokeWidth={isDistorted ? 2 : 2}
-              strokeDasharray={isDistorted ? "4 4" : "0"}
+              stroke={isDistorted ? WATER.line : fillColor}
+              strokeWidth={2}
+              strokeDasharray={isDistorted ? '4 4' : '0'}
               fill="url(#depthFill)"
               name="actualDepth"
               isAnimationActive={false}
@@ -233,33 +222,31 @@ export default function DepthProfileChart({ potholes }) {
       </div>
 
       {/* Legend */}
-      <div className="flex items-center gap-5 mt-2 ml-1 flex-wrap">
+      <div className="flex items-center gap-5 mt-2 ml-1 flex-wrap font-mono text-[9px] uppercase tracking-[0.1em] text-slate-500">
         <div className="flex items-center gap-1.5">
-          <div className="w-5 h-0.5 rounded" style={{ background: isDistorted ? '#60a5fa' : fillColor, borderTop: isDistorted ? '2px dashed #60a5fa' : 'none' }} />
-          <span className="text-[10px] text-slate-500">
-            {isDistorted ? 'Water Surface (Apparent)' : 'Actual Depth'}
-          </span>
+          <div className="w-5 h-0.5" style={{ background: isDistorted ? WATER.line : fillColor }} />
+          <span>{isDistorted ? 'Water surface (apparent)' : 'Actual depth'}</span>
         </div>
-        
+
         {isDistorted && profile.predictedBowlDepth && (
           <div className="flex items-center gap-1.5">
-            <div className="w-5 h-0.5 rounded border-t-2 border-dashed border-red-400" />
-            <span className="text-[10px] text-slate-500">Predicted Depth (Extrapolated)</span>
+            <div className="w-5 h-0.5 border-t-2 border-dashed border-red-400" />
+            <span>Predicted depth (extrapolated)</span>
           </div>
         )}
-        
+
         <div className="flex items-center gap-1.5">
-          <div className="w-5 h-0.5 rounded border-t-2 border-dashed border-sky-400" />
-          <span className="text-[10px] text-slate-500">Road Surface (extrapolated)</span>
+          <div className="w-5 h-0.5 border-t-2 border-dashed border-cyan-300" />
+          <span>Road surface (extrapolated)</span>
         </div>
-        
+
         {!isDistorted && (
           <div className="flex items-center gap-1.5">
             <div className="w-2 h-2 rounded-full" style={{ background: `${fillColor}50` }} />
-            <span className="text-[10px] text-slate-500">Gap = Bowl Depth ({severity})</span>
+            <span>Gap = bowl depth ({severity})</span>
           </div>
         )}
       </div>
-    </div>
+    </InstrumentPanel>
   );
 }

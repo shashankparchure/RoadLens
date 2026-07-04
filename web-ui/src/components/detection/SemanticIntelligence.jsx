@@ -1,21 +1,40 @@
 import { BrainCircuit, SunDim } from 'lucide-react';
+import InstrumentPanel from '../instrument/InstrumentPanel';
 
-function StatGauge({ label, value, max = 1.0, isInverse = false }) {
-  // If isInverse is true, higher value = worse (red). If false, higher = better (green)
-  // For most of our metrics (variance, dissimilarity, anomaly), higher = worse (redder)
-  const pct = Math.min((value / max) * 100, 100);
-  
+/** Semicircular arc gauge with a mono value — instrument dial. */
+function ArcGauge({ label, value, max = 1.0, color = '#a78bfa' }) {
+  const pct = Math.max(0, Math.min(value / max, 1));
+  const R = 34;
+  const C = Math.PI * R; // semicircle length
   return (
-    <div className="mb-4">
-      <div className="flex justify-between items-end mb-1">
-        <span className="text-xs text-slate-400 uppercase tracking-wider">{label}</span>
-        <span className="text-sm font-mono text-white">{value.toFixed(4)}</span>
-      </div>
-      <div className="w-full h-1.5 rounded-full bg-slate-800">
-        <div 
-          className="h-full rounded-full bg-gradient-to-r from-amber-500 to-red-500" 
-          style={{ width: `${pct}%` }} 
+    <div className="flex items-center gap-4">
+      <svg width="88" height="52" viewBox="0 0 88 52" aria-hidden="true" className="shrink-0">
+        <path
+          d={`M 10 46 A ${R} ${R} 0 0 1 78 46`}
+          fill="none"
+          stroke="#29303f"
+          strokeWidth="6"
+          strokeLinecap="round"
         />
+        <path
+          d={`M 10 46 A ${R} ${R} 0 0 1 78 46`}
+          fill="none"
+          stroke={color}
+          strokeWidth="6"
+          strokeLinecap="round"
+          strokeDasharray={`${C * pct} ${C}`}
+          style={{ filter: `drop-shadow(0 0 4px ${color}66)`, transition: 'stroke-dasharray 0.8s ease-out' }}
+        />
+        {/* Quadrant ticks */}
+        <line x1="44" y1="6" x2="44" y2="12" stroke="#3c4354" strokeWidth="1.5" />
+        <line x1="10" y1="46" x2="14" y2="46" stroke="#3c4354" strokeWidth="1.5" />
+        <line x1="74" y1="46" x2="78" y2="46" stroke="#3c4354" strokeWidth="1.5" />
+      </svg>
+      <div className="min-w-0">
+        <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-slate-500">{label}</p>
+        <p className="font-mono text-lg font-semibold" style={{ color }}>
+          {value.toFixed(4)}
+        </p>
       </div>
     </div>
   );
@@ -26,30 +45,44 @@ export default function SemanticIntelligence({ geometryAnalysis }) {
 
   const { foundationFeatures, curvatureFeatures } = geometryAnalysis;
   const sfsAnomaly = curvatureFeatures?.mean_normal_deviation || 0;
-  const sfsRange = curvatureFeatures?.depth_range || 0; // Using depth range as proxy if SfS missing
 
   return (
-    <div className="glass-card p-5 fade-in-up" style={{ animationDelay: '0.1s' }}>
+    <InstrumentPanel
+      title="Semantic Verification"
+      accent="holo"
+      statusLabel="DINOV2 · SFS"
+      bodyClassName="p-4 sm:p-5"
+      flicker={false}
+    >
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        
         {/* Foundation Features (DINOv2) */}
         <div>
           <div className="flex items-center gap-2 mb-4">
-            <div className="p-1.5 rounded bg-purple-500/10 border border-purple-500/20">
-              <BrainCircuit className="w-4 h-4 text-purple-400" />
+            <div className="p-1.5 rounded-[2px] bg-holo-violet/10 border border-holo-violet/30">
+              <BrainCircuit className="w-4 h-4 text-holo-violet-bright" />
             </div>
-            <h3 className="text-sm font-bold text-slate-200">Vision Foundation (DINOv2)</h3>
+            <h3 className="text-sm font-semibold text-slate-300">Vision foundation — is it a real crater?</h3>
           </div>
-          
-          <div className="bg-slate-900/40 rounded-lg p-4 border border-white/5 h-[140px]">
+
+          <div className="bg-slate-950/60 rounded-[2px] p-4 border border-slate-700 min-h-[150px] space-y-4">
             {foundationFeatures ? (
               <>
-                <StatGauge label="Semantic Dissimilarity" value={foundationFeatures.dissimilarity} max={1.0} />
-                <StatGauge label="Internal Chaos (Var)" value={foundationFeatures.insideVariance} max={2.0} />
+                <ArcGauge
+                  label="Semantic dissimilarity"
+                  value={foundationFeatures.dissimilarity}
+                  max={1.0}
+                  color="#a78bfa"
+                />
+                <ArcGauge
+                  label="Interior variance"
+                  value={foundationFeatures.insideVariance}
+                  max={2.0}
+                  color="#e879f9"
+                />
               </>
             ) : (
-              <div className="h-full flex items-center justify-center text-xs text-slate-500 text-center">
-                Foundation model not loaded.<br/>Install transformers to enable DINOv2.
+              <div className="h-full min-h-[120px] flex items-center justify-center font-mono text-[11px] text-slate-500 text-center uppercase tracking-wider">
+                Foundation model offline
               </div>
             )}
           </div>
@@ -58,21 +91,26 @@ export default function SemanticIntelligence({ geometryAnalysis }) {
         {/* Shape from Shading */}
         <div>
           <div className="flex items-center gap-2 mb-4">
-            <div className="p-1.5 rounded bg-orange-500/10 border border-orange-500/20">
-              <SunDim className="w-4 h-4 text-orange-400" />
+            <div className="p-1.5 rounded-[2px] bg-holo-teal/10 border border-holo-teal/30">
+              <SunDim className="w-4 h-4 text-holo-teal-bright" />
             </div>
-            <h3 className="text-sm font-bold text-slate-200">Shape-from-Shading (SfS)</h3>
+            <h3 className="text-sm font-semibold text-slate-300">Shape-from-shading — wall steepness</h3>
           </div>
-          
-          <div className="bg-slate-900/40 rounded-lg p-4 border border-white/5 h-[140px]">
-            <StatGauge label="Surface Normal Anomaly" value={sfsAnomaly} max={1.0} />
-            <div className="mt-3 text-xs text-slate-400 leading-relaxed">
-              Detects steep lighting gradients and inconsistent surface normals indicative of deep cavities regardless of 2D shadows.
-            </div>
+
+          <div className="bg-slate-950/60 rounded-[2px] p-4 border border-slate-700 min-h-[150px]">
+            <ArcGauge
+              label="Surface normal anomaly"
+              value={sfsAnomaly}
+              max={1.0}
+              color="#5eead4"
+            />
+            <p className="mt-4 text-xs text-slate-500 leading-relaxed">
+              Steep lighting gradients and deviant surface normals mark real cavity walls —
+              a depth witness that ignores 2D shadows entirely.
+            </p>
           </div>
         </div>
-
       </div>
-    </div>
+    </InstrumentPanel>
   );
 }

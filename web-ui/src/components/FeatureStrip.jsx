@@ -1,6 +1,7 @@
 import {
   Maximize2, ArrowDown, TrendingUp, Activity, BarChart3, ArrowUpRight,
 } from 'lucide-react';
+import InstrumentPanel from './instrument/InstrumentPanel';
 
 const FEATURE_CARDS = [
   { key: 'pothole_area', label: 'Pothole Area', unit: 'px²', icon: Maximize2, format: (v) => v.toLocaleString() },
@@ -14,9 +15,9 @@ const FEATURE_CARDS = [
 function MiniGauge({ value, max = 1.0 }) {
   const pct = Math.min((value / max) * 100, 100);
   return (
-    <div className="w-full h-1 rounded-full bg-slate-700/50 mt-2">
+    <div className="w-full h-[3px] bg-slate-700/60 mt-2.5">
       <div
-        className="h-full rounded-full bg-gradient-to-r from-cyan-500/60 to-amber-500"
+        className="h-full bg-gradient-to-r from-cyan-500/70 to-amber-500"
         style={{ width: `${pct}%`, transition: 'width 0.8s ease-out' }}
       />
     </div>
@@ -25,30 +26,37 @@ function MiniGauge({ value, max = 1.0 }) {
 
 export default function FeatureStrip({ features }) {
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-      {FEATURE_CARDS.map(({ key, label, unit, icon: Icon, format }, i) => {
-        const val = features[key] ?? 0;
-        const gaugeMax = key === 'pothole_area' ? 50000 : 1.0;
-        return (
-          <div
-            key={key}
-            className="glass-card-bright p-4 fade-in-up"
-            style={{ animationDelay: `${i * 0.08}s` }}
-          >
-            <div className="flex items-center gap-2 mb-2">
-              <Icon className="w-4 h-4 text-cyan-500/70" strokeWidth={1.5} />
-              <span className="text-[11px] text-slate-500 uppercase tracking-wider font-medium">
-                {label}
-              </span>
+    <InstrumentPanel
+      title="Depth Telemetry"
+      accent="cyan"
+      statusLabel="6 CH"
+      bodyClassName="p-3 sm:p-4"
+      flicker={false}
+    >
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        {FEATURE_CARDS.map(({ key, label, unit, icon: Icon, format }) => {
+          const val = features[key] ?? 0;
+          const gaugeMax = key === 'pothole_area' ? 50000 : 1.0;
+          return (
+            <div
+              key={key}
+              className="bg-slate-950/60 border border-slate-700 rounded-[2px] p-3.5"
+            >
+              <div className="flex items-center gap-1.5 mb-2">
+                <Icon className="w-3.5 h-3.5 text-cyan-400/70" strokeWidth={1.5} />
+                <span className="font-mono text-[9px] text-slate-500 uppercase tracking-[0.14em] truncate">
+                  {label}
+                </span>
+              </div>
+              <p className="font-mono text-lg font-semibold text-white leading-none">
+                {format(val)}
+                {unit && <span className="text-[10px] text-slate-500 ml-1">{unit}</span>}
+              </p>
+              <MiniGauge value={val} max={gaugeMax} />
             </div>
-            <p className="text-xl font-bold text-white tracking-tight">
-              {format(val)}
-              {unit && <span className="text-xs text-slate-500 ml-1">{unit}</span>}
-            </p>
-            <MiniGauge value={val} max={gaugeMax} />
-          </div>
-        );
-      })}
-    </div>
+          );
+        })}
+      </div>
+    </InstrumentPanel>
   );
 }

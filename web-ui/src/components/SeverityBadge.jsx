@@ -1,8 +1,10 @@
-import { SEVERITY_COLORS } from '../mockData';
+import { severityToken, normalizeSeverity } from '../theme/severity';
 
 export default function SeverityBadge({ severity, consensusCount, total }) {
-  const color = SEVERITY_COLORS[severity] || SEVERITY_COLORS['Moderate'];
-  const isDeep = severity === 'Deep';
+  const token = severityToken(severity);
+  const key = normalizeSeverity(severity);
+  const isDeep = key === 'Deep';
+  const hasConsensus = Number.isFinite(consensusCount) && Number.isFinite(total);
 
   return (
     <div className="flex flex-col items-center gap-3">
@@ -10,22 +12,25 @@ export default function SeverityBadge({ severity, consensusCount, total }) {
         className={`
           w-36 h-36 rounded-full flex flex-col items-center justify-center
           border-4 transition-all duration-500
-          ${isDeep ? 'glow-red-pulse' : ''}
+          ${isDeep ? 'hazard-pulse' : ''}
         `}
         style={{
-          borderColor: color.bg,
-          boxShadow: isDeep ? undefined : `0 0 30px ${color.ring}, 0 0 80px ${color.ring}`,
-          background: `radial-gradient(circle at center, ${color.bg}18, transparent 70%)`,
+          borderColor: token.color,
+          boxShadow: isDeep ? undefined : `0 0 30px ${token.ring}, 0 0 80px ${token.ring}`,
+          background: `radial-gradient(circle at center, ${token.color}18, transparent 70%)`,
         }}
       >
-        <span className="text-4xl mb-1">
-          {severity === 'No Pothole' ? '🟢' : severity === 'Shallow' ? '🟡' : severity === 'Moderate' ? '🟠' : '🔴'}
-        </span>
+        <span
+          className="w-3 h-3 rounded-full mb-2"
+          style={{ background: token.color, boxShadow: `0 0 12px ${token.color}` }}
+        />
         <span className="text-lg font-bold text-white tracking-wide">{severity}</span>
       </div>
-      <p className="text-sm text-slate-400">
-        Detected by <span className="text-amber-400 font-semibold">{consensusCount}</span> of {total} classifiers
-      </p>
+      {hasConsensus && (
+        <p className="text-sm text-slate-400 font-mono">
+          <span className="text-amber-400 font-semibold">{consensusCount}</span>/{total} AGREE
+        </p>
+      )}
     </div>
   );
 }

@@ -1,21 +1,34 @@
 import { useState, useRef, useCallback } from 'react';
-import { Upload, Radar, AlertTriangle } from 'lucide-react';
-import { CLASSIFIERS } from '../mockData';
+import { Crosshair, ScanLine } from 'lucide-react';
+import InstrumentPanel from './instrument/InstrumentPanel';
+import CornerBrackets from './instrument/CornerBrackets';
+
+/** Real pipeline stages — fixed status chips, not toggles. */
+const PIPELINE_MODULES = ['YOLOV8-SEG', 'DEPTH-V2', 'SFS', 'DINOV2', 'ENSEMBLE'];
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
 
 export default function UploadPanel({ onImageUpload, onRunAnalysis, isLoading }) {
   const [preview, setPreview] = useState(null);
+  const [meta, setMeta] = useState(null); // { name, size, w, h }
   const [isDragging, setIsDragging] = useState(false);
-  const [enabledClassifiers, setEnabledClassifiers] = useState(
-    Object.fromEntries(CLASSIFIERS.map(c => [c.id, true]))
-  );
   const fileInputRef = useRef(null);
 
   const handleFile = useCallback((file) => {
     if (!file || !file.type.startsWith('image/')) return;
     const reader = new FileReader();
     reader.onload = (e) => {
-      setPreview(e.target.result);
-      onImageUpload(e.target.result, file);
+      const dataUrl = e.target.result;
+      setPreview(dataUrl);
+      const img = new Image();
+      img.onload = () => setMeta({ name: file.name, size: file.size, w: img.naturalWidth, h: img.naturalHeight });
+      img.src = dataUrl;
+      onImageUpload(dataUrl, file);
     };
     reader.readAsDataURL(file);
   }, [onImageUpload]);
@@ -23,8 +36,7 @@ export default function UploadPanel({ onImageUpload, onRunAnalysis, isLoading })
   const handleDrop = useCallback((e) => {
     e.preventDefault();
     setIsDragging(false);
-    const file = e.dataTransfer.files[0];
-    handleFile(file);
+    handleFile(e.dataTransfer.files[0]);
   }, [handleFile]);
 
   const handleDragOver = useCallback((e) => {
@@ -32,48 +44,47 @@ export default function UploadPanel({ onImageUpload, onRunAnalysis, isLoading })
     setIsDragging(true);
   }, []);
 
-  const handleDragLeave = useCallback(() => {
-    setIsDragging(false);
-  }, []);
+  const handleDragLeave = useCallback(() => setIsDragging(false), []);
 
   const loadDemo = useCallback(async () => {
-    const url = '/sample_pothole.png';
-    const res = await fetch(url);
+    const res = await fetch('/sample_pothole.png');
     const blob = await res.blob();
     const file = new File([blob], 'sample_pothole.png', { type: blob.type });
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      setPreview(e.target.result);
-      onImageUpload(e.target.result, file);
-    };
-    reader.readAsDataURL(blob);
-  }, [onImageUpload]);
-
-  const toggleClassifier = (id) => {
-    setEnabledClassifiers(prev => ({ ...prev, [id]: !prev[id] }));
-  };
+    handleFile(file);
+  }, [handleFile]);
 
   return (
-    <section className="w-full max-w-5xl mx-auto mb-10">
-      {/* Upload Zone */}
+    <InstrumentPanel
+      title="Specimen Intake"
+      statusLabel={preview ? 'FRAME STAGED' : 'AWAITING FRAME'}
+      accent="amber"
+      bodyClassName="p-4 sm:p-5"
+      className="max-w-5xl mx-auto"
+    >
+      {/* Scanner tray */}
       <div
         onDrop={handleDrop}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onClick={() => fileInputRef.current?.click()}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click(); }}
+        aria-label="Upload a road-surface image"
         className={`
-          relative glass-card cursor-pointer
-          border-2 border-dashed transition-all duration-300 ease-out
+          relative cursor-pointer instrument-grid rounded-[2px]
+          border transition-all duration-300 ease-out
           flex flex-col items-center justify-center
-          min-h-[260px] p-8
-          ${isDragging
-            ? 'border-amber-500 bg-amber-500/[0.04] scale-[1.01]'
-            : preview
-              ? 'border-amber-500/30 hover:border-amber-500/60'
-              : 'border-amber-500/40 hover:border-amber-500/70'
-          }
+          min-h-[260px] p-8 bg-slate-950/60
+          ${isDragging ? 'border-amber-500 bg-amber-500/[0.05]' : 'border-slate-700 hover:border-amber-500/50'}
         `}
       >
+        <CornerBrackets
+          color={isDragging ? 'rgba(245,158,11,1)' : 'rgba(245,158,11,0.45)'}
+          size={18}
+          inset={8}
+        />
+
         <input
           ref={fileInputRef}
           type="file"
@@ -83,92 +94,88 @@ export default function UploadPanel({ onImageUpload, onRunAnalysis, isLoading })
         />
 
         {preview ? (
-          <div className="flex flex-col items-center gap-4">
-            <img
-              src={preview}
-              alt="Uploaded road"
-              className="max-h-[180px] rounded-xl object-contain shadow-2xl"
-            />
-            <p className="text-slate-400 text-sm">
-              Click or drag to replace image
-            </p>
+          <div className="flex flex-col sm:flex-row items-center gap-6 w-full justify-center">
+            <div className="relative">
+              <img
+                src={preview}
+                alt="Staged road frame"
+                className="max-h-[190px] rounded-[2px] object-contain border border-slate-700"
+              />
+              <CornerBrackets color="rgba(103,232,249,0.8)" size={12} inset={-4} />
+            </div>
+            <div className="space-y-2.5 font-mono text-[11px] tracking-wider text-left">
+              <p className="text-slate-500 uppercase text-[10px]">Frame metadata</p>
+              <p className="text-slate-300 max-w-[240px] truncate">{meta?.name || 'frame.jpg'}</p>
+              <p className="text-cyan-300">{meta ? `${meta.w} × ${meta.h} PX` : '— × — PX'}</p>
+              <p className="text-slate-400">{formatBytes(meta?.size)}</p>
+              <p className="text-slate-600 text-[10px] uppercase">Click or drop to replace</p>
+            </div>
           </div>
         ) : (
           <div className="flex flex-col items-center gap-4 text-center">
-            {/* Road crack icon */}
-            <div className="w-16 h-16 rounded-2xl bg-amber-500/10 flex items-center justify-center mb-1">
-              <AlertTriangle className="w-8 h-8 text-amber-500" strokeWidth={1.5} />
+            <div className="relative w-16 h-16 flex items-center justify-center">
+              <Crosshair className="w-9 h-9 text-amber-500 crosshair-pulse" strokeWidth={1.4} />
             </div>
             <div>
-              <p className="text-xl font-semibold text-slate-200">
-                Drop a road image to analyze
+              <p className="font-mono text-sm tracking-[0.18em] text-slate-300 uppercase">
+                Drop road-surface frame
               </p>
-              <p className="text-sm text-slate-500 mt-1">
-                PNG, JPG up to 20MB — or click to browse
+              <p className="font-mono text-[10px] tracking-[0.14em] text-slate-500 uppercase mt-2">
+                or click to browse · PNG / JPG ≤ 20 MB
               </p>
               <button
                 onClick={(e) => { e.stopPropagation(); loadDemo(); }}
-                className="mt-2 text-xs text-amber-500 hover:text-amber-400 underline underline-offset-2 transition-colors"
+                className="mt-3 font-mono text-[11px] tracking-[0.12em] uppercase text-amber-500 hover:text-amber-300 underline underline-offset-4 transition-colors"
               >
-                Try with sample pothole image →
+                Load sample frame →
               </button>
             </div>
           </div>
         )}
-
-        {/* Drag shimmer overlay */}
-        {isDragging && (
-          <div className="absolute inset-0 rounded-2xl border-2 border-amber-500 animate-pulse pointer-events-none" />
-        )}
       </div>
 
-      {/* Classifier Toggles */}
-      <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
-        {CLASSIFIERS.map(cls => (
-          <button
-            key={cls.id}
-            onClick={() => toggleClassifier(cls.id)}
-            className={`
-              px-4 py-1.5 rounded-full text-xs font-medium
-              transition-all duration-200 border
-              ${enabledClassifiers[cls.id]
-                ? cls.type === 'rule'
-                  ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-400'
-                  : 'bg-amber-500/15 border-amber-500/40 text-amber-400'
-                : 'bg-slate-800/50 border-slate-700 text-slate-500'
-              }
-            `}
-          >
-            {cls.name}
-          </button>
+      {/* Pipeline modules — honest status row */}
+      <div className="mt-4 flex flex-wrap items-center justify-center gap-x-5 gap-y-2">
+        <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-slate-600">
+          Pipeline modules
+        </span>
+        {PIPELINE_MODULES.map((mod) => (
+          <span key={mod} className="flex items-center gap-1.5 font-mono text-[10px] tracking-[0.12em] text-slate-400">
+            <span className="w-1 h-1 rounded-full bg-cyan-400" style={{ boxShadow: '0 0 5px #22d3ee' }} />
+            {mod}
+            <span className="text-slate-600">ARMED</span>
+          </span>
         ))}
       </div>
 
-      {/* Run Analysis Button */}
+      {/* Initiate scan */}
       <button
         onClick={onRunAnalysis}
         disabled={!preview || isLoading}
         className={`
-          mt-5 w-full py-3.5 rounded-xl font-semibold text-base
-          transition-all duration-300 flex items-center justify-center gap-2
+          mt-4 w-full py-3.5 rounded-[2px] font-mono text-sm tracking-[0.22em] uppercase
+          transition-all duration-300 flex items-center justify-center gap-3 relative overflow-hidden
           ${preview && !isLoading
-            ? 'bg-gradient-to-r from-amber-600 to-orange-600 text-white hover:glow-amber hover:scale-[1.01] active:scale-[0.99] cursor-pointer'
-            : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+            ? 'bg-amber-500 text-slate-950 font-semibold hover:bg-amber-400 cursor-pointer'
+            : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
           }
         `}
       >
+        {preview && !isLoading && (
+          <span className="absolute left-0 top-0 bottom-0 w-2 hazard-stripes" aria-hidden="true" />
+        )}
         {isLoading ? (
           <>
-            <Radar className="w-5 h-5 animate-spin" />
-            Running YOLOv8 + Depth Estimation…
+            <ScanLine className="w-4 h-4 animate-pulse" />
+            Scan in progress
           </>
         ) : (
           <>
-            <Upload className="w-5 h-5" />
-            Run Analysis
+            <ScanLine className="w-4 h-4" />
+            Initiate scan
           </>
         )}
       </button>
-    </section>
+    </InstrumentPanel>
   );
 }
